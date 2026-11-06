@@ -41,7 +41,8 @@
     "test-types": "tstyche",
     "build": "tsc -p tsconfig.build.json",
     "check-dist": "node scripts/check-dist.mjs",
-    "validate": "npm run check && npm test && npm run test-types && npm run build && npm run check-dist",
+    "example": "node examples/getting-started.ts",
+    "validate": "npm run check && npm test && npm run test-types && npm run build && npm run example && npm run check-dist",
     "prepublishOnly": "npm run build",
     "changeset": "changeset",
     "version": "changeset version && npm install --package-lock-only"
@@ -51,6 +52,7 @@
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.0",
+    "@effect/platform-node": "4.1.2",
     "@effect/sql-sqlite-node": "4.1.2",
     "@effect/vitest": "4.1.2",
     "@types/node": "^26.6.6",

@@ -85,8 +85,8 @@ const rewriteWalkthrough = (text) => {
     `its code comes from\n[effect-permission-examples](${EXAMPLES}), a shift-swap API described in its\n[README](README.md).`
   )
   replace(
-    "and you can run it with\n`node src/getting-started.ts`.",
-    "and you can run it in the examples repo\nwith `node src/getting-started.ts`."
+    "It's\n[`src/getting-started.ts`](src/getting-started.ts), and you can run it with\n`node src/getting-started.ts`.",
+    "It's\n[`examples/getting-started.ts`](examples/getting-started.ts) in this repo, and you\ncan run it with `node examples/getting-started.ts` after `npm run build`."
   )
   return [
     "<!-- Synced from jpowersdev/effect-permission-examples by scripts/sync.mjs; edit it there. -->",
@@ -100,7 +100,20 @@ const rewriteWalkthrough = (text) => {
   ].join("\n")
 }
 
+// The one-page example imports the package by name, as an app would
+const rewriteExample = (text) => {
+  const from = "Run it with\n * `node src/getting-started.ts`."
+  if (!text.includes(from)) throw new Error("sync: the getting-started example changed; update rewriteExample")
+  return [
+    "// Synced from jpowersdev/effect-permission-examples by scripts/sync.mjs; edit it there.",
+    text
+      .replace(from, "Run it with\n * `node examples/getting-started.ts` after `npm run build`.")
+      .replaceAll(`"effect/permission"`, `"${PACKAGE}"`)
+  ].join("\n")
+}
+
 const files = new Map()
+files.set("examples/getting-started.ts", rewriteExample(examplesGit("show", `${examplesCommit}:src/getting-started.ts`)))
 files.set("WALKTHROUGH.md", rewriteWalkthrough(examplesGit("show", `${examplesCommit}:WALKTHROUGH.md`)))
 for (const name of list("packages/effect/src/permission")) {
   files.set(`src/${name}`, rewriteSource(read(`packages/effect/src/permission/${name}`)))
@@ -116,7 +129,7 @@ for (const name of list("packages/effect/typetest/permission")) {
 files.set("SOURCE", `https://github.com/jpowersdev/effect/tree/${commit}\n${EXAMPLES}/tree/${examplesCommit}\n`)
 
 // Files in the synced directories that the fork no longer has
-const stale = ["src", "test", "typetest"].flatMap((dir) =>
+const stale = ["src", "test", "typetest", "examples"].flatMap((dir) =>
   Fs.existsSync(Path.join(root, dir))
     ? Fs.readdirSync(Path.join(root, dir)).map((name) => `${dir}/${name}`).filter((path) => !files.has(path))
     : []

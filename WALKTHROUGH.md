@@ -54,8 +54,8 @@ are:
 
 This is the smallest complete program: one rule, checked on one document and
 then used as the `WHERE` clause of a list query. It's
-[`src/getting-started.ts`](https://github.com/jpowersdev/effect-permission-examples/blob/fadb6fa4262ed1042bc805cd63cfb3ced1b813a2/src/getting-started.ts), and you can run it in the examples repo
-with `node src/getting-started.ts`.
+[`examples/getting-started.ts`](examples/getting-started.ts) in this repo, and you
+can run it with `node examples/getting-started.ts` after `npm run build`.
 
 **Example** (One rule, two uses)
 
