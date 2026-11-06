@@ -1,5 +1,5 @@
-// Packs the built package and uses it from a fresh project, the way an app
-// installing it from npm would: type-checks a consumer against the published
+// Packs the built package and uses it from a fresh npm project, the way an
+// app installing it from npm would: type-checks a consumer against the published
 // declarations and runs it against the published JavaScript.
 import { execFileSync } from "node:child_process"
 import * as Fs from "node:fs"
@@ -12,7 +12,9 @@ const run = (cmd, args, cwd) => execFileSync(cmd, args, { cwd, encoding: "utf8",
 
 const dir = Fs.mkdtempSync(Path.join(Os.tmpdir(), "effect-permission-dist-"))
 try {
-  const tarball = run("npm", ["pack", "--silent", "--pack-destination", dir], root).trim().split("\n").at(-1)
+  // `--ignore-scripts`, so `prepack` doesn't rebuild what was just built and checked
+  const packed = JSON.parse(run("pnpm", ["pack", "--json", "--ignore-scripts", "--pack-destination", dir], root))
+  const tarball = Path.basename(packed.filename)
   Fs.writeFileSync(
     Path.join(dir, "package.json"),
     JSON.stringify({
@@ -80,8 +82,7 @@ console.log(result)
   run(Path.join(root, "node_modules/.bin/tsc"), ["-p", "tsconfig.json"], dir)
   // Node runs the consumer with its types stripped, against the packed JavaScript
   const output = run("node", ["consumer.ts"], dir).trim()
-  const files = run("npm", ["pack", "--dry-run", "--json"], root)
-  const count = JSON.parse(files)[0].files.length
+  const count = packed.files.length
   console.log(`dist OK: ${tarball} (${count} files), consumer printed "${output}"`)
 } finally {
   Fs.rmSync(dir, { recursive: true, force: true })

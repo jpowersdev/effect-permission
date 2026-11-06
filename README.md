@@ -88,10 +88,10 @@ Each can also be imported on its own, such as `@jpowersdev/effect-permission/Con
 The modules, tests and type tests are generated from the [`permission` branch](https://github.com/jpowersdev/effect/tree/permission) of a fork of Effect, and the walkthrough and `examples/` from the [examples repo](https://github.com/jpowersdev/effect-permission-examples). Make changes there, then sync:
 
 ```sh
-npm run sync          # copy from local checkouts (--repo, --ref, --examples, --examples-ref)
-npm run sync:check    # fail if the files differ from the fork
-npm run example       # run examples/getting-started.ts against the build
-npm run validate      # type-check, test, type-test, build, run the example, and test the packed package
+pnpm sync          # copy from local checkouts (--repo, --ref, --examples, --examples-ref)
+pnpm sync:check    # fail if the files differ from the fork or the examples
+pnpm example       # run examples/getting-started.ts against the build
+pnpm validate      # type-check, test, type-test, build, run the example, and test the packed package
 ```
 
 `SOURCE` records the commits the files came from.

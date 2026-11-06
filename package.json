@@ -36,29 +36,35 @@
   "scripts": {
     "sync": "node scripts/sync.mjs",
     "sync:check": "node scripts/sync.mjs --check",
-    "check": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test-types": "tstyche",
-    "build": "tsc -p tsconfig.build.json",
-    "check-dist": "node scripts/check-dist.mjs",
+    "build": "pnpm build:tsc && pnpm build:babel",
+    "build:tsc": "rm -rf dist && tsc -p tsconfig.build.json",
+    "build:babel": "babel dist --plugins annotate-pure-calls --out-dir dist --source-maps",
+    "prepack": "pnpm build",
     "example": "node examples/getting-started.ts",
-    "validate": "npm run check && npm test && npm run test-types && npm run build && npm run example && npm run check-dist",
-    "prepublishOnly": "npm run build",
-    "changeset": "changeset",
-    "version": "changeset version && npm install --package-lock-only"
+    "check:pack": "node scripts/check-pack.mjs",
+    "validate": "pnpm typecheck && pnpm test && pnpm test-types && pnpm build && pnpm example && pnpm check:pack",
+    "changeset": "changeset"
   },
   "peerDependencies": {
     "effect": "^4.1.2"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.31.0",
+    "@babel/cli": "^8.0.6",
+    "@babel/core": "^8.0.9",
+    "@changesets/changelog-github": "1.0.1",
+    "@changesets/cli": "3.0.3",
     "@effect/platform-node": "4.1.2",
     "@effect/sql-sqlite-node": "4.1.2",
     "@effect/vitest": "4.1.2",
     "@types/node": "^26.6.6",
+    "babel-plugin-annotate-pure-calls": "^0.5.0",
     "effect": "4.1.2",
     "tstyche": "^7.2.5",
     "typescript": "^7.0.2",
     "vitest": "^5.1.0"
-  }
+  },
+  "packageManager": "pnpm@12.9.0"
 }
