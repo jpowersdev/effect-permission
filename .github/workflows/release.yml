@@ -1,0 +1,45 @@
+name: Release
+
+# The changesets flow. On push to main:
+#   - if there are pending changesets, open/update a "Version package" PR (bump + changelog);
+#   - if there are none (i.e. that PR was just merged), publish to npm and tag a GitHub release.
+#
+# Publishing uses npm Trusted Publishing (OIDC), so there is no npm token. It needs a trusted
+# publisher configured for this package on npmjs.com, id-token: write, and npm >= 11.5.1.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # manual "Run workflow" trigger: publishes any unpublished version on main
+
+concurrency: release-${{ github.ref }}
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # npm >= 11.5.1 for OIDC. Not 12: its `npm info --json` returns an array, which changesets
+      # misreads as "never published" and tries to republish the current version.
+      - name: Ensure OIDC-capable npm
+        run: npm install -g npm@11
+      # Validate in its own step: changesets/action runs `publish` without a shell
+      - name: Validate
+        run: npm run validate
+      - uses: changesets/action@v1
+        with:
+          version: npm run version
+          publish: npx changeset publish
+          commit: Version package
+          title: Version package
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,1032 @@
+/**
+ * Conditions are the inspectable expressions permission rules are written in.
+ *
+ * A condition is data, not a function: `Condition.eq(unit.hospitalId,
+ * principal.attributes.homeHospitalId)` records which fields are compared
+ * instead of comparing them. That is what lets the same condition be checked
+ * against one record in memory, simplified once the principal is known, and
+ * compiled into a SQL `WHERE` clause by `PermissionSql`.
+ *
+ * Fields are referenced through {@link Refs}, typed views of the principal and
+ * the resource whose properties are references rather than values. A
+ * reference to a `Principal.Lazy` attribute is a reference to its value, and
+ * evaluating or simplifying a condition loads the attribute only if it gets
+ * that far.
+ *
+ * **Details**
+ *
+ * Conditions use SQL's three-valued logic so that in-memory checks and compiled
+ * filters agree: comparing a missing (`null` or `undefined`) value is unknown,
+ * `not` of unknown is unknown, and a condition that ends up unknown does not
+ * pass.
+ *
+ * **Gotchas**
+ *
+ * - {@link custom} conditions run arbitrary effects. They work for checks on a
+ *   single record, but cannot be compiled to SQL.
+ * - References are proxies: any property name except `then` and `toJSON` reads
+ *   as a nested field.
+ *
+ * @stability experimental
+ * @since 0.1.0
+ */
+import type * as Brand from "effect/Brand"
+import * as Data from "effect/Data"
+import * as Effect from "effect/Effect"
+import * as Predicate from "effect/Predicate"
+import type * as Types from "effect/Types"
+import type * as PermissionError from "./PermissionError.ts"
+import * as Principal from "./Principal.ts"
+
+const TypeId = "~effect/permission/Condition" as const
+const RefTypeId = "~effect/permission/Condition/Ref" as const
+const RelationTypeId = "~effect/permission/Condition/Relation" as const
+
+// -----------------------------------------------------------------------------
+// References
+// -----------------------------------------------------------------------------
+
+/**
+ * Where a reference points: the principal making the request, or the resource
+ * being accessed.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export type Source = "principal" | "resource"
+
+/**
+ * A reference to a field of the principal or the resource, used as an operand
+ * in a condition instead of a value.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export interface Ref<out A> {
+  readonly [RefTypeId]: {
+    readonly _A: Types.Covariant<A>
+    readonly source: Source
+    readonly path: ReadonlyArray<string>
+  }
+}
+
+type Leaf =
+  | string
+  | number
+  | boolean
+  | bigint
+  | symbol
+  | null
+  | undefined
+  | Date
+  | ReadonlyArray<any>
+  | ReadonlySet<any>
+  | ReadonlyMap<any, any>
+  | ((...args: ReadonlyArray<any>) => any)
+
+/**
+ * A typed view of a value whose fields are {@link Ref}s instead of values.
+ *
+ * **Details**
+ *
+ * Objects expose one reference per field, recursively. Primitives, arrays,
+ * sets, maps, dates, and functions are leaves. A `Principal.Lazy` field is
+ * referenced as the value it loads.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export type Refs<A> = [NonNullable<A>] extends [Leaf] ? Ref<A>
+  : [NonNullable<A>] extends [object] ? ObjectRefs<A>
+  : Ref<A>
+
+/**
+ * The {@link Refs} of an object: a {@link Ref} to the object, with one
+ * reference per field.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+// One mapped type rather than an intersection, so errors show the object's
+// fields instead of expanding every nested reference
+export type ObjectRefs<A> = {
+  readonly [K in (keyof NonNullable<A> & string) | typeof RefTypeId]: K extends typeof RefTypeId ?
+    Ref<A>[typeof RefTypeId]
+    : Refs<Principal.Loaded<NonNullable<A>[K & keyof NonNullable<A>]> | Extract<A, null | undefined>>
+}
+
+/**
+ * A condition operand: either a literal value or a {@link Ref} to a field.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export type Operand<A> = A | Ref<A>
+
+type Unbrand<A> = A extends Brand.Brand<any> ? Brand.Brand.Unbranded<A> : A
+
+/**
+ * Returns `true` when a value is a {@link Ref}.
+ *
+ * @stability experimental
+ * @category guards
+ * @since 0.1.0
+ */
+export const isRef = (u: unknown): u is Ref<unknown> => Predicate.hasProperty(u, RefTypeId)
+
+const refMeta = (ref: Ref<unknown>): { readonly source: Source; readonly path: ReadonlyArray<string> } => ref[RefTypeId]
+
+const makeRef = (source: Source, path: ReadonlyArray<string>): any => {
+  const meta = { source, path }
+  return new Proxy({ [RefTypeId]: meta }, {
+    get(_target, key) {
+      if (key === RefTypeId) return meta
+      if (typeof key === "symbol" || key === "then") return undefined
+      if (key === "toJSON") return () => ({ _id: "Ref", source, path })
+      return makeRef(source, [...path, key])
+    }
+  })
+}
+
+/**
+ * Creates root references for writing conditions outside `Permission.rules`.
+ *
+ * @stability experimental
+ * @category constructors
+ * @since 0.1.0
+ */
+export const refs = <Principal, Resource>(): {
+  readonly principal: Refs<Principal>
+  readonly resource: Refs<Resource>
+} => ({ principal: makeRef("principal", []), resource: makeRef("resource", []) })
+
+// -----------------------------------------------------------------------------
+// Relations
+// -----------------------------------------------------------------------------
+
+/**
+ * A named relationship between a subject and an object, such as "profile is a
+ * member of unit".
+ *
+ * **Details**
+ *
+ * A relation says nothing about where its facts are stored. The relation store
+ * provided to the authorizer answers lookups, for example from a SQL table via
+ * `PermissionSql.relation`.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export interface Relation<in out Subject, in out Object> {
+  readonly [RelationTypeId]: {
+    readonly _Subject: Types.Invariant<Subject>
+    readonly _Object: Types.Invariant<Object>
+  }
+  readonly name: string
+  /**
+   * Creates one fact of this relation, for in-memory relation stores and
+   * tests.
+   */
+  of(subject: Subject, object: Object): RelationTuple
+}
+
+/**
+ * One fact of a {@link Relation}: this subject is related to this object.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export interface RelationTuple {
+  readonly relation: Relation<any, any>
+  readonly subject: unknown
+  readonly object: unknown
+}
+
+/**
+ * Declares a relation between subjects and objects.
+ *
+ * **Example** (Declaring a membership relation)
+ *
+ * ```ts
+ * import { Condition } from "@jpowersdev/effect-permission"
+ *
+ * const UnitMembership = Condition.relation<string, string>("unit:member")
+ * ```
+ *
+ * @stability experimental
+ * @category constructors
+ * @since 0.1.0
+ */
+export const relation = <Subject, Object>(name: string): Relation<Subject, Object> => {
+  const self: Relation<Subject, Object> = {
+    [RelationTypeId]: { _Subject: (_) => _, _Object: (_) => _ },
+    name,
+    of: (subject, object) => ({ relation: self, subject, object })
+  }
+  return self
+}
+
+// -----------------------------------------------------------------------------
+// Models
+// -----------------------------------------------------------------------------
+
+interface Proto<R> {
+  readonly [TypeId]: {
+    readonly _R: Types.Covariant<R>
+  }
+}
+
+/**
+ * A condition that is always true, always false, or unknown (`null`).
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export interface Literal extends Proto<never> {
+  readonly _tag: "Literal"
+  readonly value: boolean | null
+}
+
+/**
+ * A condition that holds when a boolean field is `true`.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export interface Truthy extends Proto<never> {
+  readonly _tag: "Truthy"
+  readonly value: Operand<unknown>
+}
+
+/**
+ * Comparison operators supported by {@link Compare}.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export type Operator = "eq" | "neq" | "lt" | "lte" | "gt" | "gte"
+
+/**
+ * A condition that compares two operands.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export interface Compare extends Proto<never> {
+  readonly _tag: "Compare"
+  readonly operator: Operator
+  readonly left: Operand<unknown>
+  readonly right: Operand<unknown>
+}
+
+/**
+ * A condition that holds when a value is one of a list of values.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export interface OneOf extends Proto<never> {
+  readonly _tag: "OneOf"
+  readonly value: Operand<unknown>
+  readonly list: ReadonlyArray<Operand<unknown>> | Ref<unknown>
+}
+
+/**
+ * A condition that holds when a value is `null` or `undefined`.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export interface IsNull extends Proto<never> {
+  readonly _tag: "IsNull"
+  readonly value: Operand<unknown>
+}
+
+/**
+ * A condition that holds when every condition holds.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export interface And<R> extends Proto<R> {
+  readonly _tag: "And"
+  readonly conditions: ReadonlyArray<Condition<R>>
+}
+
+/**
+ * A condition that holds when at least one condition holds.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export interface Or<R> extends Proto<R> {
+  readonly _tag: "Or"
+  readonly conditions: ReadonlyArray<Condition<R>>
+}
+
+/**
+ * A condition that holds when another condition is false.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export interface Not<R> extends Proto<R> {
+  readonly _tag: "Not"
+  readonly condition: Condition<R>
+}
+
+/**
+ * A condition that holds when a {@link Relation} fact exists between a subject
+ * and an object.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export interface Related extends Proto<never> {
+  readonly _tag: "Related"
+  readonly relation: Relation<any, any>
+  readonly subject: Operand<unknown>
+  readonly object: Operand<unknown>
+}
+
+/**
+ * A condition that runs an effect against the real principal and resource.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export interface Custom<R> extends Proto<R> {
+  readonly _tag: "Custom"
+  readonly name: string
+  readonly evaluate: (input: {
+    readonly principal: any
+    readonly resource: any
+  }) => Effect.Effect<boolean, unknown, R>
+}
+
+/**
+ * An inspectable condition over the principal and the resource. `R` is the
+ * services required by any {@link custom} conditions it contains.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export type Condition<R = never> =
+  | Literal
+  | Truthy
+  | Compare
+  | OneOf
+  | IsNull
+  | And<R>
+  | Or<R>
+  | Not<R>
+  | Related
+  | Custom<R>
+
+/**
+ * A value accepted wherever a condition is expected: a condition, or a
+ * reference to a boolean field.
+ *
+ * @stability experimental
+ * @category models
+ * @since 0.1.0
+ */
+export type Input<R = never> = Condition<R> | Ref<boolean> | Ref<boolean | null | undefined>
+
+/**
+ * Extracts the services required by a condition.
+ *
+ * @stability experimental
+ * @category utility types
+ * @since 0.1.0
+ */
+export type Services<C> = C extends { readonly [TypeId]: { readonly _R: Types.Covariant<infer R> } } ? R : never
+
+/**
+ * Returns `true` when a value is a {@link Condition}.
+ *
+ * @stability experimental
+ * @category guards
+ * @since 0.1.0
+ */
+export const isCondition = (u: unknown): u is Condition<unknown> => Predicate.hasProperty(u, TypeId)
+
+const variance = { _R: (_: never) => _ }
+
+const make = <C extends Condition<any>>(node: Omit<C, typeof TypeId>): C => ({ [TypeId]: variance, ...node }) as C
+
+const normalize = <R>(input: Input<R>): Condition<R> =>
+  isRef(input) ? make<Truthy>({ _tag: "Truthy", value: input }) : input
+
+// -----------------------------------------------------------------------------
+// Constructors
+// -----------------------------------------------------------------------------
+
+/**
+ * A condition that always holds.
+ *
+ * @stability experimental
+ * @category constructors
+ * @since 0.1.0
+ */
+export const always: Condition = make<Literal>({ _tag: "Literal", value: true })
+
+/**
+ * A condition that never holds.
+ *
+ * @stability experimental
+ * @category constructors
+ * @since 0.1.0
+ */
+export const never: Condition = make<Literal>({ _tag: "Literal", value: false })
+
+const unknown: Condition = make<Literal>({ _tag: "Literal", value: null })
+
+const literal = (value: boolean | null): Condition => value === true ? always : value === false ? never : unknown
+
+const compare = (operator: Operator) => (left: Operand<unknown>, right: Operand<unknown>): Condition =>
+  make<Compare>({ _tag: "Compare", operator, left, right })
+
+/**
+ * Creates a condition that holds when two operands are equal.
+ *
+ * **Example** (Matching the owner)
+ *
+ * ```ts
+ * import { Condition } from "@jpowersdev/effect-permission"
+ *
+ * const { principal, resource } = Condition.refs<{ readonly id: string }, { readonly ownerId: string }>()
+ * const isOwner = Condition.eq(resource.ownerId, principal.id)
+ * ```
+ *
+ * @stability experimental
+ * @category constructors
+ * @since 0.1.0
+ */
+export const eq: <A>(left: Operand<A>, right: Operand<Unbrand<NoInfer<A>>>) => Condition = compare("eq")
+
+/**
+ * Creates a condition that holds when two operands are not equal.
+ *
+ * **Gotchas**
+ *
+ * Like SQL `<>`, comparing a missing value is unknown, not true.
+ *
+ * @stability experimental
+ * @category constructors
+ * @since 0.1.0
+ */
+export const notEq: <A>(left: Operand<A>, right: Operand<Unbrand<NoInfer<A>>>) => Condition = compare("neq")
+
+/**
+ * Creates a condition that holds when the left operand is less than the right.
+ *
+ * @stability experimental
+ * @category constructors
+ * @since 0.1.0
+ */
+export const lt: <A>(left: Operand<A>, right: Operand<Unbrand<NoInfer<A>>>) => Condition = compare("lt")
+
+/**
+ * Creates a condition that holds when the left operand is less than or equal
+ * to the right.
+ *
+ * @stability experimental
+ * @category constructors
+ * @since 0.1.0
+ */
+export const lte: <A>(left: Operand<A>, right: Operand<Unbrand<NoInfer<A>>>) => Condition = compare("lte")
+
+/**
+ * Creates a condition that holds when the left operand is greater than the
+ * right.
+ *
+ * @stability experimental
+ * @category constructors
+ * @since 0.1.0
+ */
+export const gt: <A>(left: Operand<A>, right: Operand<Unbrand<NoInfer<A>>>) => Condition = compare("gt")
+
+/**
+ * Creates a condition that holds when the left operand is greater than or
+ * equal to the right.
+ *
+ * @stability experimental
+ * @category constructors
+ * @since 0.1.0
+ */
+export const gte: <A>(left: Operand<A>, right: Operand<Unbrand<NoInfer<A>>>) => Condition = compare("gte")
+
+/**
+ * Creates a condition that holds when a value is one of a list of values. The
+ * list can be literal operands or a reference to an array or set field.
+ *
+ * **Gotchas**
+ *
+ * `null` and `undefined` entries in the list are ignored.
+ *
+ * @stability experimental
+ * @category constructors
+ * @since 0.1.0
+ */
+export const oneOf = <A>(
+  value: Operand<A>,
+  list:
+    | ReadonlyArray<Operand<Unbrand<NoInfer<A>>>>
+    | Ref<ReadonlyArray<Unbrand<NoInfer<A>>> | ReadonlySet<Unbrand<NoInfer<A>>> | null | undefined>
+): Condition => make<OneOf>({ _tag: "OneOf", value, list: list as OneOf["list"] })
+
+/**
+ * Creates a condition that holds when a value is `null` or `undefined`.
+ *
+ * @stability experimental
+ * @category constructors
+ * @since 0.1.0
+ */
+export const isNull = (value: Operand<unknown>): Condition => make<IsNull>({ _tag: "IsNull", value })
+
+/**
+ * Creates a condition that holds when a value is neither `null` nor
+ * `undefined`.
+ *
+ * @stability experimental
+ * @category constructors
+ * @since 0.1.0
+ */
+export const isNotNull = (value: Operand<unknown>): Condition => not(isNull(value))
+
+/**
+ * Creates a condition that holds when every input holds. With no inputs it
+ * always holds.
+ *
+ * @stability experimental
+ * @category combinators
+ * @since 0.1.0
+ */
+export const and = <const Inputs extends ReadonlyArray<Input<any>>>(
+  ...inputs: Inputs
+): Condition<Services<Inputs[number]>> => make<And<any>>({ _tag: "And", conditions: inputs.map(normalize) })
+
+/**
+ * Creates a condition that holds when at least one input holds. With no inputs
+ * it never holds.
+ *
+ * @stability experimental
+ * @category combinators
+ * @since 0.1.0
+ */
+export const or = <const Inputs extends ReadonlyArray<Input<any>>>(
+  ...inputs: Inputs
+): Condition<Services<Inputs[number]>> => make<Or<any>>({ _tag: "Or", conditions: inputs.map(normalize) })
+
+/**
+ * Creates a condition that holds when the input is false.
+ *
+ * **Gotchas**
+ *
+ * Like SQL `NOT`, negating an unknown result is still unknown.
+ *
+ * @stability experimental
+ * @category combinators
+ * @since 0.1.0
+ */
+export const not = <R>(input: Input<R>): Condition<R> => make<Not<R>>({ _tag: "Not", condition: normalize(input) })
+
+/**
+ * Creates a condition that holds when a relation fact exists between a subject
+ * and an object.
+ *
+ * **Example** (Checking unit membership)
+ *
+ * ```ts
+ * import { Condition } from "@jpowersdev/effect-permission"
+ *
+ * const UnitMembership = Condition.relation<string, string>("unit:member")
+ * const { principal, resource } = Condition.refs<{ readonly id: string }, { readonly unitId: string }>()
+ *
+ * const isMember = Condition.related(UnitMembership, principal.id, resource.unitId)
+ * ```
+ *
+ * @stability experimental
+ * @category constructors
+ * @since 0.1.0
+ */
+export const related = <Subject, Object>(
+  relation: Relation<Subject, Object>,
+  subject: Operand<Unbrand<NoInfer<Subject>>>,
+  object: Operand<Unbrand<NoInfer<Object>>>
+): Condition => make<Related>({ _tag: "Related", relation, subject, object })
+
+/**
+ * Creates a condition from an effect that receives the real principal and
+ * resource values.
+ *
+ * **When to use**
+ *
+ * Use when a rule cannot be expressed as data, such as a check that calls
+ * another service.
+ *
+ * **Gotchas**
+ *
+ * - Custom conditions cannot be compiled to SQL, so avoid them on actions
+ *   used to filter lists.
+ * - A failure becomes a `CustomConditionError`, never an allow or a deny.
+ *
+ * @stability experimental
+ * @category constructors
+ * @since 0.1.0
+ */
+export const custom = <Principal = any, Resource = any, R = never>(
+  name: string,
+  evaluate: (
+    input: { readonly principal: Principal; readonly resource: Resource }
+  ) => Effect.Effect<boolean, unknown, R>
+): Condition<R> => make<Custom<R>>({ _tag: "Custom", name, evaluate })
+
+// -----------------------------------------------------------------------------
+// Inspection
+// -----------------------------------------------------------------------------
+
+/**
+ * Returns `true` when a condition is the literal {@link always}.
+ *
+ * @stability experimental
+ * @category guards
+ * @since 0.1.0
+ */
+export const isAlways = (self: Condition<any>): boolean => self._tag === "Literal" && self.value === true
+
+/**
+ * Returns `true` when a condition can never hold: it is the literal
+ * {@link never} or the unknown literal.
+ *
+ * @stability experimental
+ * @category guards
+ * @since 0.1.0
+ */
+export const isNever = (self: Condition<any>): boolean => self._tag === "Literal" && self.value !== true
+
+/**
+ * Returns `true` when a condition contains a {@link custom} condition.
+ *
+ * @stability experimental
+ * @category guards
+ * @since 0.1.0
+ */
+export const hasCustom = (self: Condition<any>): boolean => {
+  switch (self._tag) {
+    case "Custom":
+      return true
+    case "And":
+    case "Or":
+      return self.conditions.some(hasCustom)
+    case "Not":
+      return hasCustom(self.condition)
+    default:
+      return false
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Evaluation
+// -----------------------------------------------------------------------------
+
+type Truth = boolean | null
+
+// Reads a field, loading any `Principal.Lazy` attribute on the way
+const getPath = (
+  root: unknown,
+  path: ReadonlyArray<string>
+): Effect.Effect<unknown, PermissionError.PermissionUnavailable> => {
+  let current = root
+  for (let index = 0; index < path.length; index++) {
+    if (Principal.isLazy(current)) {
+      const rest = path.slice(index)
+      return Effect.flatMap(current, (value) => getPath(value, rest))
+    }
+    if (current === null || current === undefined) return Effect.undefined
+    current = (current as Record<string, unknown>)[path[index]]
+  }
+  return Principal.isLazy(current) ? current : Effect.succeed(current)
+}
+
+const isMissing = (u: unknown): u is null | undefined => u === null || u === undefined
+
+const compareValues = (operator: Operator, left: unknown, right: unknown): Truth => {
+  if (isMissing(left) || isMissing(right)) return null
+  const l = left instanceof Date ? left.getTime() : left
+  const r = right instanceof Date ? right.getTime() : right
+  switch (operator) {
+    case "eq":
+      return l === r
+    case "neq":
+      return l !== r
+    case "lt":
+      return (l as any) < (r as any)
+    case "lte":
+      return (l as any) <= (r as any)
+    case "gt":
+      return (l as any) > (r as any)
+    case "gte":
+      return (l as any) >= (r as any)
+  }
+}
+
+const toList = (value: unknown): ReadonlyArray<unknown> | undefined =>
+  Array.isArray(value) ? value : value instanceof Set ? Array.from(value) : undefined
+
+const oneOfValues = (value: unknown, list: ReadonlyArray<unknown> | undefined): Truth => {
+  if (isMissing(value) || list === undefined) return null
+  return list.some((item) => !isMissing(item) && compareValues("eq", value, item) === true)
+}
+
+const truthyValue = (value: unknown): Truth => value === true ? true : isMissing(value) ? null : false
+
+const andTruth = (values: ReadonlyArray<Truth>): Truth =>
+  values.some((value) => value === false) ? false : values.some((value) => value === null) ? null : true
+
+const orTruth = (values: ReadonlyArray<Truth>): Truth =>
+  values.some((value) => value === true) ? true : values.some((value) => value === null) ? null : false
+
+const cost = (self: Condition<any>): number => {
+  switch (self._tag) {
+    case "Custom":
+      return 2
+    case "Related":
+      return 1
+    case "And":
+    case "Or":
+      return Math.max(0, ...self.conditions.map(cost))
+    case "Not":
+      return cost(self.condition)
+    default:
+      return 0
+  }
+}
+
+const byCost = (conditions: ReadonlyArray<Condition<any>>): ReadonlyArray<Condition<any>> =>
+  conditions.map((condition, index) => ({ condition, index, cost: cost(condition) }))
+    .sort((a, b) => a.cost - b.cost || a.index - b.index)
+    .map(({ condition }) => condition)
+
+/**
+ * The failure of a {@link custom} condition's effect.
+ *
+ * @stability experimental
+ * @category errors
+ * @since 0.1.0
+ */
+export class CustomConditionError extends Data.TaggedError("CustomConditionError")<{
+  readonly name: string
+  readonly cause: unknown
+}> {}
+
+/**
+ * Evaluates a condition against a real principal and resource.
+ *
+ * **Details**
+ *
+ * Inexpensive comparisons run first, then relation lookups, then custom
+ * conditions, stopping as soon as the result is known. Relation lookups go
+ * through `related`; evaluating a relation without it is a defect.
+ *
+ * A `Principal.Lazy` attribute is loaded when evaluation reaches it, so one
+ * that comes after the result is known is never loaded. A failed load is a
+ * `PermissionUnavailable` failure.
+ *
+ * @stability experimental
+ * @category evaluation
+ * @since 0.1.0
+ */
+export const evaluate = <R, E = never, R2 = never>(
+  self: Condition<R>,
+  options: {
+    readonly principal: unknown
+    readonly resource: unknown
+    readonly related?:
+      | ((relation: Relation<any, any>, subject: unknown, object: unknown) => Effect.Effect<boolean, E, R2>)
+      | undefined
+  }
+): Effect.Effect<boolean, E | CustomConditionError | PermissionError.PermissionUnavailable, R | R2> => {
+  type Failure = E | CustomConditionError | PermissionError.PermissionUnavailable
+  const resolve = (operand: Operand<unknown>): Effect.Effect<unknown, PermissionError.PermissionUnavailable> => {
+    if (!isRef(operand)) return Effect.succeed(operand)
+    const { path, source } = refMeta(operand)
+    return getPath(source === "principal" ? options.principal : options.resource, path)
+  }
+  // Resolves both operands, skipping the second when the first is missing
+  const both = (
+    first: Operand<unknown>,
+    second: Operand<unknown>,
+    f: (first: unknown, second: unknown) => Effect.Effect<Truth, Failure, R | R2>
+  ): Effect.Effect<Truth, Failure, R | R2> =>
+    Effect.flatMap(
+      resolve(first),
+      (a) => isMissing(a) ? Effect.succeed(null) : Effect.flatMap(resolve(second), (b) => f(a, b))
+    )
+  const go = (condition: Condition<any>): Effect.Effect<Truth, Failure, R | R2> => {
+    switch (condition._tag) {
+      case "Literal":
+        return Effect.succeed(condition.value)
+      case "Truthy":
+        return Effect.map(resolve(condition.value), truthyValue)
+      case "Compare":
+        return both(
+          condition.left,
+          condition.right,
+          (left, right) => Effect.succeed(compareValues(condition.operator, left, right))
+        )
+      case "OneOf": {
+        const { list } = condition
+        return Effect.flatMap(resolve(condition.value), (value) => {
+          if (isMissing(value)) return Effect.succeed(null)
+          return isRef(list)
+            ? Effect.map(resolve(list), (items) => oneOfValues(value, toList(items)))
+            : Effect.map(Effect.forEach(list, resolve), (items) => oneOfValues(value, items))
+        })
+      }
+      case "IsNull":
+        return Effect.map(resolve(condition.value), isMissing)
+      case "Not":
+        return Effect.map(go(condition.condition), (value) => value === null ? null : !value)
+      case "And":
+      case "Or": {
+        const stop = condition._tag !== "And"
+        const combine = condition._tag === "And" ? andTruth : orTruth
+        return Effect.suspend(() => {
+          const results: Array<Truth> = []
+          const conditions = byCost(condition.conditions)
+          const loop = (index: number): Effect.Effect<Truth, Failure, R | R2> =>
+            index === conditions.length ?
+              Effect.succeed(combine(results)) :
+              Effect.flatMap(go(conditions[index]), (value) => {
+                if (value === stop) return Effect.succeed(stop)
+                results.push(value)
+                return loop(index + 1)
+              })
+          return loop(0)
+        })
+      }
+      case "Related": {
+        const { relation } = condition
+        return both(condition.subject, condition.object, (subject, object) => {
+          if (isMissing(object)) return Effect.succeed(null)
+          if (options.related === undefined) {
+            return Effect.die(new Error(`Condition.evaluate: no relation lookup for "${relation.name}"`))
+          }
+          return options.related(relation, subject, object)
+        })
+      }
+      case "Custom":
+        return condition.evaluate({ principal: options.principal, resource: options.resource }).pipe(
+          Effect.mapError((cause) => new CustomConditionError({ name: condition.name, cause }))
+        )
+    }
+  }
+  return Effect.map(go(self), (value) => value === true)
+}
+
+/**
+ * Substitutes the principal's values into a condition and folds whatever
+ * becomes known, leaving a condition over resource fields only.
+ *
+ * **When to use**
+ *
+ * Use to prepare a condition for compiling to SQL, or to ask whether a
+ * principal could ever pass: a result of {@link never} means no resource
+ * qualifies.
+ *
+ * **Details**
+ *
+ * Relation lookups and custom conditions are kept as they are, with the
+ * principal's values filled in.
+ *
+ * Conditions in an `and` or `or` are simplified in the order they are written,
+ * stopping at the first one that decides the result, so a `Principal.Lazy`
+ * attribute after it is never loaded. A failed load is a
+ * `PermissionUnavailable` failure.
+ *
+ * @stability experimental
+ * @category evaluation
+ * @since 0.1.0
+ */
+export const simplify = <R>(
+  self: Condition<R>,
+  principal: unknown
+): Effect.Effect<Condition<R>, PermissionError.PermissionUnavailable> => {
+  type Simplified = Effect.Effect<Condition<any>, PermissionError.PermissionUnavailable>
+  const substitute = (
+    operand: Operand<unknown>
+  ): Effect.Effect<Operand<unknown>, PermissionError.PermissionUnavailable> => {
+    if (!isRef(operand)) return Effect.succeed(operand)
+    const { path, source } = refMeta(operand)
+    return source === "principal" ? getPath(principal, path) : Effect.succeed(operand)
+  }
+  const go = (condition: Condition<any>): Simplified => {
+    switch (condition._tag) {
+      case "Literal":
+      case "Custom":
+        return Effect.succeed(condition)
+      case "Truthy":
+        return Effect.map(
+          substitute(condition.value),
+          (value) => isRef(value) ? condition : literal(truthyValue(value))
+        )
+      case "Compare":
+        return Effect.flatMap(substitute(condition.left), (left) => {
+          if (!isRef(left) && isMissing(left)) return Effect.succeed(unknown)
+          return Effect.map(substitute(condition.right), (right) => {
+            if (!isRef(left) && !isRef(right)) return literal(compareValues(condition.operator, left, right))
+            if (!isRef(right) && isMissing(right)) return unknown
+            return make<Compare>({ _tag: "Compare", operator: condition.operator, left, right })
+          })
+        })
+      case "OneOf":
+        return Effect.flatMap(substitute(condition.value), (value) => {
+          if (!isRef(value) && isMissing(value)) return Effect.succeed(unknown)
+          const listOperand = isRef(condition.list)
+            ? substitute(condition.list)
+            : Effect.forEach(condition.list, substitute)
+          return Effect.map(listOperand, (listOperand) => {
+            const list = isRef(listOperand) ? listOperand : toList(listOperand)
+            if (list === undefined) return unknown
+            if (isRef(list)) return make<OneOf>({ _tag: "OneOf", value, list })
+            const known = list.filter((item) => !isRef(item))
+            const pending = list.filter(isRef)
+            if (!isRef(value) && pending.length === 0) return literal(oneOfValues(value, known))
+            if (isRef(value) && pending.length === 0 && known.every(isMissing)) return never
+            return make<OneOf>({ _tag: "OneOf", value, list })
+          })
+        })
+      case "IsNull":
+        return Effect.map(
+          substitute(condition.value),
+          (value) => isRef(value) ? make<IsNull>({ _tag: "IsNull", value }) : literal(isMissing(value))
+        )
+      case "Not":
+        return Effect.map(
+          go(condition.condition),
+          (inner) => inner._tag === "Literal" ? literal(inner.value === null ? null : !inner.value) : not(inner)
+        )
+      case "And":
+      case "Or": {
+        const isAnd = condition._tag === "And"
+        const decided = isAnd ? never : always
+        return Effect.suspend(() => {
+          const parts: Array<Condition<any>> = []
+          const loop = (index: number): Simplified => {
+            if (index === condition.conditions.length) {
+              const rest = parts.filter((part) => !(part._tag === "Literal" && part.value === isAnd))
+              if (rest.length === 0) return Effect.succeed(isAnd ? always : never)
+              if (rest.length === 1) return Effect.succeed(rest[0])
+              return Effect.succeed(isAnd ? and(...rest) : or(...rest))
+            }
+            return Effect.flatMap(go(condition.conditions[index]), (simplified) => {
+              if (simplified._tag === "Literal" && simplified.value === !isAnd) return Effect.succeed(decided)
+              if (simplified._tag === condition._tag) {
+                parts.push(...simplified.conditions)
+              } else {
+                parts.push(simplified)
+              }
+              return loop(index + 1)
+            })
+          }
+          return loop(0)
+        })
+      }
+      case "Related":
+        return Effect.flatMap(
+          substitute(condition.subject),
+          (subject) =>
+            Effect.map(
+              substitute(condition.object),
+              (object) => make<Related>({ _tag: "Related", relation: condition.relation, subject, object })
+            )
+        )
+    }
+  }
+  return go(self)
+}
+
+/** @internal */
+export const refPath = (ref: Ref<unknown>): { readonly source: Source; readonly path: ReadonlyArray<string> } =>
+  refMeta(ref)

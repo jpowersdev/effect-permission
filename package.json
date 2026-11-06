@@ -1,0 +1,61 @@
+{
+  "name": "@jpowersdev/effect-permission",
+  "version": "0.1.0",
+  "description": "Authorization rules for Effect, written once and enforced on records, list queries and endpoints",
+  "type": "module",
+  "license": "MIT",
+  "author": "Jonathan Powers <jon@powers.dev>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jpowersdev/effect-permission.git"
+  },
+  "sideEffects": [],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./*": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    },
+    "./index": null
+  },
+  "scripts": {
+    "sync": "node scripts/sync.mjs",
+    "sync:check": "node scripts/sync.mjs --check",
+    "check": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test-types": "tstyche",
+    "build": "tsc -p tsconfig.build.json",
+    "check-dist": "node scripts/check-dist.mjs",
+    "validate": "npm run check && npm test && npm run test-types && npm run build && npm run check-dist",
+    "prepublishOnly": "npm run build",
+    "changeset": "changeset",
+    "version": "changeset version && npm install --package-lock-only"
+  },
+  "peerDependencies": {
+    "effect": "^4.1.2"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.31.0",
+    "@effect/sql-sqlite-node": "4.1.2",
+    "@effect/vitest": "4.1.2",
+    "@types/node": "^26.6.6",
+    "effect": "4.1.2",
+    "tstyche": "^7.2.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}
