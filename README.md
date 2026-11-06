@@ -65,7 +65,7 @@ const program = Effect.gen(function*() {
 )
 ```
 
-The [walkthrough](https://github.com/jpowersdev/effect-permission-examples/blob/main/WALKTHROUGH.md) goes through each module with code from an example app and the output it produces. It imports from `effect/permission`, the proposed upstream path; the API is the same under this package's name.
+The [walkthrough](WALKTHROUGH.md) goes through each module with code from an [example app](https://github.com/jpowersdev/effect-permission-examples) and the output it produces.
 
 ## Modules
 
@@ -85,15 +85,15 @@ Each can also be imported on its own, such as `@jpowersdev/effect-permission/Con
 
 ## Development
 
-The modules, tests and type tests are generated from the [`permission` branch](https://github.com/jpowersdev/effect/tree/permission) of a fork of Effect. Make changes there, then sync:
+The modules, tests and type tests are generated from the [`permission` branch](https://github.com/jpowersdev/effect/tree/permission) of a fork of Effect, and the walkthrough from the [examples repo](https://github.com/jpowersdev/effect-permission-examples). Make changes there, then sync:
 
 ```sh
-npm run sync          # copy from a local checkout of the fork (--repo, --ref)
+npm run sync          # copy from local checkouts (--repo, --ref, --examples, --examples-ref)
 npm run sync:check    # fail if the files differ from the fork
 npm run validate      # type-check, test, type-test, build, and test the packed package
 ```
 
-`SOURCE` records the fork commit the files came from.
+`SOURCE` records the commits the files came from.
 
 ## License
 
